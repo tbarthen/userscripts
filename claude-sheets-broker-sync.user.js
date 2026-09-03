@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.2
+// @version      3.3
 // @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Merrill and Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates, never clicks.
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
@@ -11,7 +11,7 @@
 // @match        https://vanguard.com/*
 // @match        https://client.schwab.com/*
 // @match        https://www.benefits.ml.com/Accounts/Home*
-// @match        https://wwws.betterment.com/app/performance*
+// @match        https://wwws.betterment.com/app*
 // @noframes
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -42,7 +42,10 @@
  *   Merrill     benefits.ml.com/Accounts/Home: total market value + the footnote's
  *               "previous business day M/D/YYYY" (the PRIOR close) → brokerReadingsProxy.
  *   Betterment  betterment.com/app/performance: the "Balance" figure + "As of MM/DD/YYYY"
- *               → brokerReadingsProxy.
+ *               → brokerReadingsProxy. v3.3: the app is a single-page app — you land on
+ *               /app and click Performance without a page load, and Tampermonkey injects
+ *               only on a load — so the script matches all of /app* and WATCHES the URL,
+ *               running the reader each time you arrive on the Performance page.
  *
  * NOTHING NAVIGATES. The v1.x scripts redirected pages and clicked selectors, which made
  * the sites unusable with them enabled; every action here happens on the page you chose
@@ -251,14 +254,25 @@
         }
     };
     const readings = {
-        POLL_MS: 500, POLL_LIMIT_MS: 20000,
+        POLL_MS: 500, POLL_LIMIT_MS: 20000, WATCH_MS: 1000,
         which: () => Object.keys(READERS).find(k => READERS[k].test()),
-        test: () => !!readings.which(),
+        // The handler owns the whole site (the SPA case above); which() says whether THIS
+        // URL is a page a reader can read.
+        test: () => location.hostname === 'www.benefits.ml.com' || location.hostname === 'wwws.betterment.com',
         menu: [['Read balance now', () => readings.run(true)]],
-        start() { readings.run(false); },
+        start() {
+            let lastUrl = null;
+            const check = () => {
+                if (location.href === lastUrl) return;
+                lastUrl = location.href;
+                if (readings.which()) readings.run(false);
+            };
+            check();
+            setInterval(check, readings.WATCH_MS);
+        },
         run(forced) {
             const name = readings.which();
-            if (!name) return;
+            if (!name) { if (forced) toast('Not a page this script reads — open Performance (Betterment) or Accounts/Home (Merrill)', true); return; }
             const began = Date.now();
             const timer = setInterval(() => {
                 const reading = READERS[name].read();
