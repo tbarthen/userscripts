@@ -1,15 +1,14 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.0
+// @version      3.1
 // @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Merrill and Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates, never clicks.
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
 // @updateURL    https://raw.githubusercontent.com/tbarthen/userscripts/main/claude-sheets-broker-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/tbarthen/userscripts/main/claude-sheets-broker-sync.user.js
-// @match        https://dashboard.web.vanguard.com/*
-// @match        https://holdings.web.vanguard.com/*
-// @match        https://cost-basis.web.vanguard.com/*
+// @match        https://*.vanguard.com/*
+// @match        https://vanguard.com/*
 // @match        https://client.schwab.com/*
 // @match        https://www.benefits.ml.com/Accounts/Home*
 // @match        https://wwws.betterment.com/app/performance*
@@ -30,8 +29,10 @@
  *
  *   Vanguard    cost-basis.web.vanguard.com exports the unrealized lots (Vanguard's own
  *               cost-basis API, read with your session) → vanguardCostBasisProxy.
- *               Anywhere else on Vanguard: menu "Export cost basis now". Needs the
- *               account ID (menu "Set Vanguard account ID").
+ *               Anywhere else on vanguard.com (v3.1: the "upgraded" site lives at
+ *               vanguard.com/en/investor/..., not *.web.vanguard.com): menu "Export
+ *               cost basis now". Needs the account ID (menu "Set Vanguard account ID").
+ *               login.vanguard.com is excluded on purpose.
  *   Schwab      client.schwab.com Positions with All Brokerage Accounts selected: the
  *               page's own HoldingV2 response is read passively → schwabCostBasisProxy.
  *               Menu: "Select All Brokerage Accounts", "Reset sync".
@@ -104,7 +105,7 @@
 
     // ============ HANDLER: Vanguard cost basis ============
     const vanguard = {
-        test: () => location.hostname.endsWith('.web.vanguard.com'),
+        test: () => /(^|\.)vanguard\.com$/.test(location.hostname) && location.hostname !== 'login.vanguard.com',
         menu: [['Export cost basis now', () => vanguard.run()],
                ['Set Vanguard account ID', () => askAndStore('vanguardAccountId', 'Vanguard account ID')]],
         start() { if (location.hostname === 'cost-basis.web.vanguard.com') setTimeout(() => vanguard.run(), 2000); },
