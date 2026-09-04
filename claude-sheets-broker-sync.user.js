@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.3
-// @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Merrill and Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates, never clicks.
+// @version      3.4
+// @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates, never clicks.
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
 // @updateURL    https://raw.githubusercontent.com/tbarthen/userscripts/main/claude-sheets-broker-sync.user.js
@@ -113,8 +113,16 @@
     const vanguard = {
         test: () => /(^|\.)vanguard\.com$/.test(location.hostname) && location.hostname !== 'login.vanguard.com',
         menu: [['Export cost basis now', () => vanguard.run()],
-               ['Set Vanguard account ID', () => askAndStore('vanguardAccountId', 'Vanguard account ID')]],
-        start() { if (location.hostname === 'cost-basis.web.vanguard.com') setTimeout(() => vanguard.run(), 2000); },
+               ['Set Vanguard account ID', () => askAndStore('vanguardAccountId', 'Vanguard account ID')],
+               // v3.4: the dashboard's balance, as of the date Vanguard itself states.
+               ['Read balance now', () => readings.run(true)],
+               ['Set Vanguard balance account (last digits)', () => askAndStore('vanguardBalanceAccount', 'Vanguard balance account (last digits of the account number)')]],
+        start() {
+            if (location.hostname === 'cost-basis.web.vanguard.com') setTimeout(() => vanguard.run(), 2000);
+            // v3.4: the dashboard is a single-page app too — watch the URL, read when it
+            // lands on the dashboard (READERS.vanguard). Nothing else on vanguard.com is read.
+            readings.start();
+        },
         async run() {
             const apiKey = requireKey(); if (!apiKey) return;
             const accountId = setting('vanguardAccountId');
@@ -226,9 +234,51 @@
         }
     };
 
-    // ============ HANDLER: balance readings (Merrill, Betterment) ============
-    // Each reader returns {value, asOf} or null while the page is still loading.
+    // ============ HANDLER: balance readings (Vanguard, Merrill, Betterment) ============
+    // Each reader returns {value, asOf} or null while the page is still loading, or
+    // {skip: reason} for a page whose number must NOT be recorded (an intraday value).
     const READERS = {
+        // v3.4. Vanguard's dashboard: the account's balance and the "Value as of" line
+        // in the greeting - "September 3, 2026, 7:00 p.m., Eastern time". Both live in
+        // shadow DOM (gyd-greetings-widget, gyd-accounts-widget). Only a value stated
+        // AFTER the 4 p.m. ET close is a close; an intraday figure is skipped, not sent.
+        // Why this reader exists: Plaid delivers Vanguard's PREVIOUS trading day (charter
+        // §4a, measured three times), so the sheet's Vanguard row is a day behind until
+        // the next pull. The site is current; a reading from it is trust 3 (Broker Tool)
+        // under Vanguard's own date, and the lagged Plaid write for that day then yields.
+        vanguard: {
+            test: () => /(^|\.)vanguard\.com$/.test(location.hostname) && /\/portfolio\/dashboard/.test(location.pathname),
+            read() {
+                const greet = document.querySelector('gyd-greetings-widget');
+                const accountsWidget = document.querySelector('gyd-accounts-widget');
+                const g = greet && greet.shadowRoot;
+                const a = accountsWidget && accountsWidget.shadowRoot;
+                if (!g || !a) return null;
+                const asOfText = [...g.querySelectorAll('.greeting-link')]
+                    .map(d => d.textContent.replace(/\s+/g, ' ')).find(t => /Value as of/i.test(t)) || '';
+                const m = asOfText.match(/(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),\s+(\d{4}),\s+(\d{1,2}):(\d{2})\s*([ap])\.?m\.?/i);
+                if (!m) return null;
+                const months = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+                const asOf = `${months.indexOf(m[1].toLowerCase()) + 1}/${m[2]}/${m[3]}`;
+                const hour = (parseInt(m[4], 10) % 12) + (m[6].toLowerCase() === 'p' ? 12 : 0);
+                const accounts = [...a.querySelectorAll('.individual-account-container')].map(c => {
+                    const name = c.querySelector('.account-name a');
+                    const balance = c.querySelector('gyd-value-change.balance span');
+                    return name && balance ? { name: name.textContent.trim(), value: balance.textContent.trim() } : null;
+                }).filter(x => x && MONEY.test(x.value));
+                if (!accounts.length) return null;
+                // The brokerage account: the one configured (last digits of the account
+                // number), else the single non-zero account; two non-zero accounts with
+                // nothing configured is a question, not a guess.
+                const wanted = String(setting('vanguardBalanceAccount') || '').replace(/\D/g, '');
+                const byNumber = wanted ? accounts.find(x => x.name.replace(/\D/g, '').endsWith(wanted)) : null;
+                const nonZero = accounts.filter(x => Number(x.value.replace(/[$,]/g, '')) > 0);
+                const chosen = byNumber || (nonZero.length === 1 ? nonZero[0] : null);
+                if (!chosen) return { skip: `Vanguard: ${nonZero.length} accounts with a balance - set "Vanguard balance account" (last digits) from the Tampermonkey menu` };
+                if (hour < 16) return { skip: `Vanguard: value as of ${m[4]}:${m[5]} ${m[6]}.m. ET is intraday, not the close - not recorded; visit after 4 p.m. ET` };
+                return { value: chosen.value, asOf };
+            }
+        },
         merrill: {
             test: () => location.hostname === 'www.benefits.ml.com',
             read() {
@@ -259,6 +309,7 @@
         // The handler owns the whole site (the SPA case above); which() says whether THIS
         // URL is a page a reader can read.
         test: () => location.hostname === 'www.benefits.ml.com' || location.hostname === 'wwws.betterment.com',
+        // (vanguard.com is the Vanguard handler's site; it calls readings.start() itself.)
         menu: [['Read balance now', () => readings.run(true)]],
         start() {
             let lastUrl = null;
@@ -272,10 +323,11 @@
         },
         run(forced) {
             const name = readings.which();
-            if (!name) { if (forced) toast('Not a page this script reads — open Performance (Betterment) or Accounts/Home (Merrill)', true); return; }
+            if (!name) { if (forced) toast('Not a page this script reads — open the dashboard (Vanguard), Performance (Betterment) or Accounts/Home (Merrill)', true); return; }
             const began = Date.now();
             const timer = setInterval(() => {
                 const reading = READERS[name].read();
+                if (reading && reading.skip) { clearInterval(timer); toast(reading.skip, true, 8000); return; }
                 if (reading) { clearInterval(timer); readings.post(name, reading, forced); return; }
                 if (Date.now() - began > readings.POLL_LIMIT_MS) {
                     clearInterval(timer);
