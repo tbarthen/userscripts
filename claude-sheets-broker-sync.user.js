@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.4
-// @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates, never clicks.
+// @version      3.5
+// @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates or clicks on its own - only a menu command you chose does (v3.5: Schwab "Sync positions").
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
 // @updateURL    https://raw.githubusercontent.com/tbarthen/userscripts/main/claude-sheets-broker-sync.user.js
@@ -38,7 +38,14 @@
  *               command registered once per frame and the prompt came from the iframe.
  *   Schwab      client.schwab.com Positions with All Brokerage Accounts selected: the
  *               page's own HoldingV2 response is read passively → schwabCostBasisProxy.
- *               Menu: "Select All Brokerage Accounts", "Reset sync".
+ *               Menu: "Sync positions" (v3.5: from ANY Schwab page - goes to Positions
+ *               first if needed, then selects All Brokerage Accounts; the selection
+ *               makes the page fetch holdings, which the intercept syncs), "Reset sync".
+ *               The hand-off across the page load is a GM flag with a 2-minute life, so
+ *               a plain visit to Positions never clicks anything (the v1.1 hijack).
+ *               v3.5 also posts the ACCOUNT LIST the response spoke for (an emptied
+ *               account gets its rows closed) and sends "Incomplete"-basis positions
+ *               with a null basis (held, so not closed) - hardening audit 188, A1/A2.
  *   Merrill     benefits.ml.com/Accounts/Home: total market value + the footnote's
  *               "previous business day M/D/YYYY" (the PRIOR close) → brokerReadingsProxy.
  *   Betterment  betterment.com/app/performance: the "Balance" figure + "As of MM/DD/YYYY"
@@ -158,12 +165,17 @@
 
     // ============ HANDLER: Schwab cost basis (passive XHR intercept) ============
     const SCHWAB_SECURITY_TYPES = { 1: 'Equity', 2: 'ETF', 3: 'MutualFund', 9: 'Cash' };
+    const SCHWAB_POSITIONS_URL = 'https://client.schwab.com/app/accounts/positions/#/';
+    const SCHWAB_PENDING_KEY = 'schwab.pendingSelectAll';     // GM flag: set by the menu, read once on the Positions load
+    const SCHWAB_PENDING_TTL_MS = 2 * 60 * 1000;
     const schwab = {
         test: () => location.hostname === 'client.schwab.com',
+        onPositions: () => /^\/app\/accounts\/positions\b/.test(location.pathname || ''),
         synced: false,
-        menu: [['Select All Brokerage Accounts', () => schwab.selectAllAccounts()],
+        menu: [['Sync positions (go to Positions, select All Brokerage Accounts)', () => schwab.syncFromAnywhere()],
                ['Reset sync (allow re-sync)', () => { schwab.synced = false; toast('Schwab: sync reset - reload Positions to sync again'); }]],
         start() {
+            schwab.resumePendingSelect();
             const originalOpen = XMLHttpRequest.prototype.open;
             const originalSend = XMLHttpRequest.prototype.send;
             XMLHttpRequest.prototype.open = function (method, url, ...rest) {
@@ -177,7 +189,9 @@
                             const data = JSON.parse(this.responseText);
                             if (data.accounts && data.accounts.length > 1) {          // All Brokerage Accounts selected
                                 const positions = schwab.extractPositions(data);
-                                if (positions.length) schwab.sync(positions);
+                                const accounts = schwab.extractAccounts(data);
+                                // v3.5: an account list with zero positions is a liquidation, and is sent.
+                                if (positions.length || accounts.length) schwab.sync(positions, accounts);
                             } else {
                                 console.log('[Claude Sheets] Schwab: single account response - select All Brokerage Accounts to sync');
                             }
@@ -198,12 +212,16 @@
                     for (const row of group.holdingsRows || []) {
                         const ticker = row.symbol?.symbol;
                         const quantity = row.qty?.qty;
-                        const costBasis = row.costBasis?.cstBasis;
+                        const rawBasis = row.costBasis?.cstBasis;
                         if (!ticker || !quantity) continue;
-                        if (typeof costBasis !== 'number' || isNaN(costBasis)) continue;   // "Incomplete"
+                        // v3.5 (audit 188, A2): an "Incomplete" basis used to be dropped here, and the
+                        // function then read the HELD position as sold. It is sent with a null basis;
+                        // the function counts it present and leaves the row's cost fields alone.
+                        const hasBasis = typeof rawBasis === 'number' && !isNaN(rawBasis);
                         positions.push({
-                            ticker, account: accountName, accountId, quantity, costBasis,
-                            costPerShare: row.costBasis?.cstPerShr || (costBasis / quantity),
+                            ticker, account: accountName, accountId, quantity,
+                            costBasis: hasBasis ? rawBasis : null,
+                            costPerShare: hasBasis ? (row.costBasis?.cstPerShr || (rawBasis / quantity)) : null,
                             securityType: SCHWAB_SECURITY_TYPES[group.securityType] || 'Unknown'
                         });
                     }
@@ -211,14 +229,49 @@
             }
             return positions;
         },
-        async sync(positions) {
+        // v3.5 (audit 188, A1): the accounts the response SPOKE FOR - only those whose holdings
+        // section was actually delivered. The function closes every row of a named account that
+        // sent no positions; an account whose section is missing is not named, so a partial
+        // response cannot close anything.
+        extractAccounts(data) {
+            if (!Array.isArray(data.accounts)) return [];
+            return data.accounts
+                .filter(account => Array.isArray(account.groupedPositions))
+                .map(account => ({ accountId: account.accountId || '', nickname: account.accountDetail?.nickname || 'Unknown' }));
+        },
+        async sync(positions, accounts = []) {
             if (schwab.synced) return;
             const apiKey = requireKey(); if (!apiKey) return;
             try {
-                const r = await postToFunction('schwabCostBasisProxy', { positions, timestamp: new Date().toISOString() }, apiKey);
+                const r = await postToFunction('schwabCostBasisProxy', { positions, accounts, timestamp: new Date().toISOString() }, apiKey);
                 schwab.synced = true;
-                toast(`Schwab: synced ${r.rowsWritten || (r.updated + r.inserted) || positions.length} positions`);
+                const closed = r.orphansClosed ? `, ${r.orphansClosed} closed` : '';
+                toast(`Schwab: synced ${r.positionsProcessed ?? positions.length} positions${closed}`);
             } catch (error) { toast(`Schwab: ${error.message}`, true, 10000); }
+        },
+        // v3.5, Tom: "It would be better though if the menu item would first bring you to the
+        // Positions view, then select All Brokerage Accounts." Off Positions: leave a dated flag
+        // and navigate; the Positions load picks it up. On Positions: select at once.
+        syncFromAnywhere() {
+            if (schwab.onPositions()) { schwab.selectAllAccounts(); return; }
+            GM_setValue(SCHWAB_PENDING_KEY, String(Date.now()));
+            toast('Schwab: going to Positions...');
+            location.href = SCHWAB_POSITIONS_URL;
+        },
+        // Runs on every Schwab page load. Does nothing unless the menu left a FRESH flag - a
+        // stale one (an abandoned navigation, a closed tab) is cleared, never acted on.
+        resumePendingSelect() {
+            const raw = GM_getValue(SCHWAB_PENDING_KEY, '');
+            if (!raw) return;
+            GM_setValue(SCHWAB_PENDING_KEY, '');
+            if (!schwab.onPositions() || Date.now() - Number(raw) > SCHWAB_PENDING_TTL_MS) return;
+            // The account selector renders after the SPA boots; poll for it, bounded.
+            let tries = 0;
+            const timer = setInterval(() => {
+                tries++;
+                if (document.querySelector('#account-selector')) { clearInterval(timer); schwab.selectAllAccounts(); }
+                else if (tries >= 40) { clearInterval(timer); toast('Schwab: Positions loaded but no account selector appeared', true); }
+            }, 500);
         },
         selectAllAccounts() {
             const button = document.querySelector('#account-selector');
