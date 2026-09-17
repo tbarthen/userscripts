@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.7
+// @version      3.8
 // @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates or clicks on its own - only a menu command you chose does (v3.5: Schwab "Sync positions"; v3.6: opt-in auto-login after a password-manager fill).
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
@@ -59,14 +59,15 @@
  * the sites unusable with them enabled; every action here happens on the page you chose
  * to open, or from the menu.
  *
- * v3.6/3.7 (2026-09-17) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
+ * v3.6–3.8 (2026-09-17) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
  * turn it on). The broker-sync launcher (AutoHotKey `broker_sync.ahk`, Ctrl+Alt+B or the
  * on-unlock scheduled task) opens the three data pages; a site whose session expired shows
  * its login page instead, and Bitwarden fills it (page load, or Ctrl+Shift+L sent by the
  * launcher for Vanguard's late-rendered form). This script then clicks Log in — and only
  * then: it acts when a password field is visible AND both fields are populated AND no key
  * printable key was pressed in the tab (a human typing is never submitted for; the launcher's
- * Ctrl+Shift+L chord is not typing — v3.7), AND this site has not
+ * Ctrl+Shift+L chord is not typing — v3.7), AND the button is enabled and any bot check
+ * on the page reads cleared (Betterment's "Security check … Success!" — v3.8), AND this site has not
  * been submitted in the last 10 minutes (ONE attempt per site per run — a retried wrong
  * password is how accounts get locked). It never reads, stores or types a credential.
  *   Merrill's password input carries an Inputmask (`data-sparta-input-mask`,
@@ -134,12 +135,25 @@
             const before = inputs.slice(0, inputs.indexOf(pw)).reverse();
             return before.find(i => login.visible(i) && /^(text|email)$/i.test(i.type || 'text')) || null;
         },
+        // A DISABLED button still counts as found (a site disables it until its bot check
+        // clears — v3.8); readiness is judged separately by login.ready().
+        shown: (el) => !!(el && el.offsetParent !== null),
         submitButton(pw) {
             const form = pw.form || pw.closest('form') || document;
             const explicit = form.querySelector('button[type="submit"], input[type="submit"]');
-            if (explicit && login.visible(explicit)) return explicit;
+            if (explicit && login.shown(explicit)) return explicit;
             return [...form.querySelectorAll('button, input[type="button"], a[role="button"]')]
-                .find(b => login.visible(b) && /^\s*(log|sign)\s*in\s*$/i.test(b.textContent || b.value || '')) || null;
+                .find(b => login.shown(b) && /^\s*(log|sign)\s*in\s*$/i.test(b.textContent || b.value || '')) || null;
+        },
+        // v3.8: the form is READY to submit only when its button is enabled and any bot check on
+        // the page has cleared. Betterment shows a "Security check" block that resolves to
+        // "Success!" on its own after a few seconds; a click before that is swallowed, and the
+        // one-attempt latch then (correctly) refuses a second one — so the click must wait.
+        ready(button) {
+            if (button.disabled || button.getAttribute('aria-disabled') === 'true' || button.getAttribute('aria-busy') === 'true') return false;
+            const text = document.body.innerText || '';
+            if (/Security check/i.test(text) && !/Success!/i.test(text)) return false;
+            return true;
         },
         // Merrill: replace the Inputmask-bound password input with a plain clone (same id/name,
         // no listeners, no autocomplete=off) so a programmatic fill sticks.
@@ -192,9 +206,13 @@
                 const user = login.userField(pw);
                 const filled = pw.value.length > 0 && (!user || user.value.length > 0);
                 if (filled) {
-                    finish();
                     const button = login.submitButton(pw);
-                    if (!button) { toast(`${host}: filled, but no Log in button found — press it yourself`, true, 8000); return; }
+                    if (!button) { finish(); toast(`${host}: filled, but no Log in button found — press it yourself`, true, 8000); return; }
+                    if (!login.ready(button)) {                                // bot check / disabled: keep waiting
+                        if (Date.now() - began > login.POLL_LIMIT_MS) { finish(); toast(`${host}: filled, but the form never became ready — press Log in yourself`, true, 8000); }
+                        return;
+                    }
+                    finish();
                     GM_setValue(`loginAttempt:${host}`, Date.now());
                     toast(`${host}: password manager filled the form — logging in (one attempt)`, false, 4000);
                     button.click();
