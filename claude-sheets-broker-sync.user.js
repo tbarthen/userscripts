@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.5
-// @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates or clicks on its own - only a menu command you chose does (v3.5: Schwab "Sync positions").
+// @version      3.6
+// @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates or clicks on its own - only a menu command you chose does (v3.5: Schwab "Sync positions"; v3.6: opt-in auto-login after a password-manager fill).
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
 // @updateURL    https://raw.githubusercontent.com/tbarthen/userscripts/main/claude-sheets-broker-sync.user.js
@@ -10,8 +10,9 @@
 // @match        https://*.vanguard.com/*
 // @match        https://vanguard.com/*
 // @match        https://client.schwab.com/*
-// @match        https://www.benefits.ml.com/Accounts/Home*
-// @match        https://wwws.betterment.com/app*
+// @match        https://www.benefits.ml.com/*
+// @match        https://wwws.betterment.com/*
+// @match        https://app.betterment.com/*
 // @noframes
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -58,6 +59,23 @@
  * the sites unusable with them enabled; every action here happens on the page you chose
  * to open, or from the menu.
  *
+ * v3.6 (2026-09-17) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
+ * turn it on). The broker-sync launcher (AutoHotKey `broker_sync.ahk`, Ctrl+Alt+B or the
+ * on-unlock scheduled task) opens the three data pages; a site whose session expired shows
+ * its login page instead, and Bitwarden fills it (page load, or Ctrl+Shift+L sent by the
+ * launcher for Vanguard's late-rendered form). This script then clicks Log in — and only
+ * then: it acts when a password field is visible AND both fields are populated AND no key
+ * was pressed in the tab (a human typing is never submitted for), AND this site has not
+ * been submitted in the last 10 minutes (ONE attempt per site per run — a retried wrong
+ * password is how accounts get locked). It never reads, stores or types a credential.
+ *   Merrill's password input carries an Inputmask (`data-sparta-input-mask`,
+ *   inputEventOnly) that discards programmatic values, so on that page the input is
+ *   replaced by a plain clone before the fill; if Merrill's submit rejects the clone, the
+ *   fallback is typing the password by hand (the site remembers the user ID and device).
+ * The tab title is prefixed on completion — "✅ " once a reading was posted (or was already
+ * on the sheet), "⚠️ " when nothing could be read — so a glance at the tab strip is the
+ * run report; an open login page is a tab that needs you.
+ *
  * NO SECRETS IN THIS FILE. The one API key (`cloud-functions-api-key`; all three functions
  * take it since 2026-09-03) and the Vanguard account ID live in Tampermonkey storage, set
  * once from the menu. This file is public (github.com/tbarthen/userscripts).
@@ -96,6 +114,89 @@
         setTimeout(() => el.remove(), ms);
         console.log(`[Claude Sheets] ${message}`);
     }
+
+    /** v3.6: the tab title is the run report for the launcher's tab strip. */
+    function markTab(ok) {
+        const bare = document.title.replace(/^(✅|⚠️)\s*/, '');
+        document.title = `${ok ? '✅' : '⚠️'} ${bare}`;
+    }
+
+    // ============ HANDLER: auto-login after a password-manager fill (v3.6, opt-in) ============
+    const login = {
+        ATTEMPT_WINDOW_MS: 10 * 60 * 1000, POLL_MS: 300, POLL_LIMIT_MS: 90000,
+        visible: (el) => !!(el && el.offsetParent !== null && !el.disabled && !el.readOnly),
+        passwordField: () => [...document.querySelectorAll('input[type="password"]')].find(login.visible) || null,
+        // The text field that precedes the password field in DOM order (username / email);
+        // Merrill remembers the user ID in a dropdown, so "none" is a valid answer.
+        userField(pw) {
+            const inputs = [...document.querySelectorAll('input')];
+            const before = inputs.slice(0, inputs.indexOf(pw)).reverse();
+            return before.find(i => login.visible(i) && /^(text|email)$/i.test(i.type || 'text')) || null;
+        },
+        submitButton(pw) {
+            const form = pw.form || pw.closest('form') || document;
+            const explicit = form.querySelector('button[type="submit"], input[type="submit"]');
+            if (explicit && login.visible(explicit)) return explicit;
+            return [...form.querySelectorAll('button, input[type="button"], a[role="button"]')]
+                .find(b => login.visible(b) && /^\s*(log|sign)\s*in\s*$/i.test(b.textContent || b.value || '')) || null;
+        },
+        // Merrill: replace the Inputmask-bound password input with a plain clone (same id/name,
+        // no listeners, no autocomplete=off) so a programmatic fill sticks.
+        stripMask(pw) {
+            if (!pw.hasAttribute('data-sparta-input-mask')) return pw;
+            const clone = pw.cloneNode(false);
+            clone.removeAttribute('data-sparta-input-mask');
+            clone.removeAttribute('autocomplete');
+            pw.replaceWith(clone);
+            toast('Merrill: password input mask removed for the fill', false, 3000);
+            return clone;
+        },
+        test: () => setting('autoLogin') === 'on',
+        menu: [],
+        // The login form may render after load (Vanguard) or the tab may not be a login page
+        // at all (session still trusted): watch for a visible password field, act once it is
+        // there, give up quietly after POLL_LIMIT_MS.
+        start() {
+            const host = location.hostname;
+            let typed = false, seen = false, done = false;
+            document.addEventListener('keydown', () => { typed = true; }, true);
+            const began = Date.now();
+            // `done` is the latch: once this handler has decided (clicked, blocked, handed over
+            // to a human, or timed out) it never acts again on this page, whatever the timer does.
+            const finish = () => { done = true; clearInterval(timer); };
+            const timer = setInterval(() => {
+                if (done) return;
+                if (typed) { finish(); return; }                            // a human is doing it
+                let pw = login.passwordField();
+                if (!pw) {
+                    if (seen || Date.now() - began > login.POLL_LIMIT_MS) finish();   // logged in, or never a login page
+                    return;
+                }
+                if (!seen) {
+                    seen = true;
+                    const last = Number(GM_getValue(`loginAttempt:${host}`, 0) || 0);
+                    if (Date.now() - last < login.ATTEMPT_WINDOW_MS) {
+                        finish();
+                        toast(`${host}: a login was already submitted ${Math.round((Date.now() - last) / 1000)}s ago — not retrying (one attempt per run). Sign in by hand if needed.`, true, 10000);
+                        return;
+                    }
+                    pw = login.stripMask(pw);
+                }
+                const user = login.userField(pw);
+                const filled = pw.value.length > 0 && (!user || user.value.length > 0);
+                if (filled) {
+                    finish();
+                    const button = login.submitButton(pw);
+                    if (!button) { toast(`${host}: filled, but no Log in button found — press it yourself`, true, 8000); return; }
+                    GM_setValue(`loginAttempt:${host}`, Date.now());
+                    toast(`${host}: password manager filled the form — logging in (one attempt)`, false, 4000);
+                    button.click();
+                    return;
+                }
+                if (Date.now() - began > login.POLL_LIMIT_MS) finish();     // nothing filled: yours
+            }, login.POLL_MS);
+        }
+    };
 
     /** POST JSON to one of the Cloud Functions with the shared key; resolves the parsed body. */
     function postToFunction(name, payload, apiKey) {
@@ -384,6 +485,7 @@
                 if (reading) { clearInterval(timer); readings.post(name, reading, forced); return; }
                 if (Date.now() - began > readings.POLL_LIMIT_MS) {
                     clearInterval(timer);
+                    markTab(false);
                     toast(`${name}: balance or as-of date not found on this page after ${readings.POLL_LIMIT_MS / 1000}s — nothing sent`, true, 10000);
                 }
             }, readings.POLL_MS);
@@ -392,6 +494,7 @@
             const apiKey = requireKey(); if (!apiKey) return;
             const key = `${name}|${reading.asOf}|${reading.value}`;
             if (!forced && GM_getValue('lastReadingSent', '') === key) {
+                markTab(true);
                 toast(`${name} ${reading.value} as of ${reading.asOf} — already sent`, false, 4000);
                 return;
             }
@@ -399,16 +502,23 @@
                 const result = await postToFunction('brokerReadingsProxy',
                     { institution: name, asOf: reading.asOf, value: reading.value, page: location.href, readAt: new Date().toISOString() }, apiKey);
                 GM_setValue('lastReadingSent', key);
+                markTab(true);
                 toast(`${name} ${reading.value} as of ${reading.asOf} → ${result.duplicate ? 'already on the sheet' : 'sent'}`);
-            } catch (error) { toast(`${name}: ${error.message}`, true, 10000); }
+            } catch (error) { markTab(false); toast(`${name}: ${error.message}`, true, 10000); }
         }
     };
 
     // ============ DISPATCH: exactly one handler for the site you are on ============
     const handler = [vanguard, schwab, readings].find(h => h.test());
     GM_registerMenuCommand('Set API key (all sites)', () => askAndStore('apiKey', 'Cloud Function API key'));
+    GM_registerMenuCommand(`Auto-login after autofill: ${setting('autoLogin') === 'on' ? 'ON (click to turn off)' : 'off (click to turn on)'}`, () => {
+        GM_setValue('autoLogin', setting('autoLogin') === 'on' ? 'off' : 'on');
+        toast(`Auto-login after autofill is now ${setting('autoLogin') === 'on' ? 'ON' : 'off'} — reload the page`);
+    });
     if (handler) {
         for (const [label, fn] of handler.menu) GM_registerMenuCommand(label, fn);
         handler.start();
     }
+    // v3.6: the login handler is additive — it runs beside the site handler on a login page.
+    if (login.test()) login.start();
 })();
