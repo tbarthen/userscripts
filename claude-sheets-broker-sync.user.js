@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.6
+// @version      3.7
 // @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates or clicks on its own - only a menu command you chose does (v3.5: Schwab "Sync positions"; v3.6: opt-in auto-login after a password-manager fill).
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
@@ -59,13 +59,14 @@
  * the sites unusable with them enabled; every action here happens on the page you chose
  * to open, or from the menu.
  *
- * v3.6 (2026-09-17) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
+ * v3.6/3.7 (2026-09-17) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
  * turn it on). The broker-sync launcher (AutoHotKey `broker_sync.ahk`, Ctrl+Alt+B or the
  * on-unlock scheduled task) opens the three data pages; a site whose session expired shows
  * its login page instead, and Bitwarden fills it (page load, or Ctrl+Shift+L sent by the
  * launcher for Vanguard's late-rendered form). This script then clicks Log in — and only
  * then: it acts when a password field is visible AND both fields are populated AND no key
- * was pressed in the tab (a human typing is never submitted for), AND this site has not
+ * printable key was pressed in the tab (a human typing is never submitted for; the launcher's
+ * Ctrl+Shift+L chord is not typing — v3.7), AND this site has not
  * been submitted in the last 10 minutes (ONE attempt per site per run — a retried wrong
  * password is how accounts get locked). It never reads, stores or types a credential.
  *   Merrill's password input carries an Inputmask (`data-sparta-input-mask`,
@@ -159,7 +160,13 @@
         start() {
             const host = location.hostname;
             let typed = false, seen = false, done = false;
-            document.addEventListener('keydown', () => { typed = true; }, true);
+            // A human TYPING: a printable key, Backspace or Delete with no Ctrl/Alt/Meta. A modifier
+            // chord is not typing — the launcher sends Bitwarden's own Ctrl+Shift+L to fill late-
+            // rendered (Vanguard) or re-created (Merrill) forms, and must not cancel this handler.
+            document.addEventListener('keydown', (e) => {
+                if (e.ctrlKey || e.altKey || e.metaKey) return;
+                if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') typed = true;
+            }, true);
             const began = Date.now();
             // `done` is the latch: once this handler has decided (clicked, blocked, handed over
             // to a human, or timed out) it never acts again on this page, whatever the timer does.
