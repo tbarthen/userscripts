@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.8
+// @version      3.9
 // @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates or clicks on its own - only a menu command you chose does (v3.5: Schwab "Sync positions"; v3.6: opt-in auto-login after a password-manager fill).
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
@@ -59,7 +59,7 @@
  * the sites unusable with them enabled; every action here happens on the page you chose
  * to open, or from the menu.
  *
- * v3.6–3.8 (2026-09-17) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
+ * v3.6–3.9 (2026-09-17) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
  * turn it on). The broker-sync launcher (AutoHotKey `broker_sync.ahk`, Ctrl+Alt+B or the
  * on-unlock scheduled task) opens the three data pages; a site whose session expired shows
  * its login page instead, and Bitwarden fills it (page load, or Ctrl+Shift+L sent by the
@@ -67,7 +67,7 @@
  * then: it acts when a password field is visible AND both fields are populated AND no key
  * printable key was pressed in the tab (a human typing is never submitted for; the launcher's
  * Ctrl+Shift+L chord is not typing — v3.7), AND the button is enabled and any bot check
- * on the page reads cleared (Betterment's "Security check … Success!" — v3.8), AND this site has not
+ * on the page has written its response field (Betterment's "Security check" — v3.8/3.9), AND this site has not
  * been submitted in the last 10 minutes (ONE attempt per site per run — a retried wrong
  * password is how accounts get locked). It never reads, stores or types a credential.
  *   Merrill's password input carries an Inputmask (`data-sparta-input-mask`,
@@ -149,10 +149,14 @@
         // the page has cleared. Betterment shows a "Security check" block that resolves to
         // "Success!" on its own after a few seconds; a click before that is swallowed, and the
         // one-attempt latch then (correctly) refuses a second one — so the click must wait.
+        // v3.9: the widget's own "Success!" text lives inside its iframe, invisible to this
+        // script — so readiness is read from the hidden RESPONSE field every such widget writes
+        // when solved (hCaptcha / Turnstile / reCAPTCHA). No widget on the page → ready.
+        CAPTCHA_RESPONSE: 'textarea[name="h-captcha-response"], input[name="h-captcha-response"], input[name="cf-turnstile-response"], textarea[name="g-recaptcha-response"]',
         ready(button) {
             if (button.disabled || button.getAttribute('aria-disabled') === 'true' || button.getAttribute('aria-busy') === 'true') return false;
-            const text = document.body.innerText || '';
-            if (/Security check/i.test(text) && !/Success!/i.test(text)) return false;
+            const responses = [...document.querySelectorAll(login.CAPTCHA_RESPONSE)];
+            if (responses.length && !responses.some(r => (r.value || '').length > 0)) return false;
             return true;
         },
         // Merrill: replace the Inputmask-bound password input with a plain clone (same id/name,
