@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.18
+// @version      3.19
 // @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates or clicks on its own - only a menu command you chose does (v3.5: Schwab "Sync positions"; v3.6: opt-in auto-login after a password-manager fill).
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
@@ -94,11 +94,21 @@
 (function () {
     'use strict';
     if (location.hostname === 'www.benefits.ml.com' && typeof MutationObserver === 'function') {
+        const CODE_PAGE = /authorization code|verification code|enter the code/i;
         const strip = (root) => {
             const nodes = root.querySelectorAll ? root.querySelectorAll('input[data-sparta-input-mask]') : [];
             for (const el of nodes) {
                 el.removeAttribute('data-sparta-input-mask');
                 el.setAttribute('data-claude-mask', 'prevented');
+            }
+            // v3.19: on the "authorization code" page NOTHING may be auto-filled — Bitwarden put
+            // the password into the code box (2026-09-18). `data-bwignore` is the attribute
+            // Bitwarden honours to skip a field; `one-time-code` tells every manager the same.
+            if (document.body && CODE_PAGE.test(document.body.innerText || '')) {
+                for (const el of document.querySelectorAll('input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"])')) {
+                    el.setAttribute('data-bwignore', 'true');
+                    el.setAttribute('autocomplete', 'one-time-code');
+                }
             }
         };
         const mo = new MutationObserver((records) => {
@@ -252,6 +262,8 @@
             toast('Merrill: mask instance not reachable — leaving the input as is', false, 3000);
             return pw;
         },
+        CODE_PAGE: /authorization code|verification code|enter the code/i,
+        onCodePage: () => login.CODE_PAGE.test(document.body ? (document.body.innerText || '') : ''),
         test: () => setting('autoLogin') === 'on',
         menu: [],
         // The login form may render after load (Vanguard) or the tab may not be a login page
@@ -279,6 +291,9 @@
                     if (seen || Date.now() - began > login.POLL_LIMIT_MS) finish();   // logged in, or never a login page
                     return;
                 }
+                // v3.19: a one-time-code page is never submitted for — the code is typed by a human,
+                // and a password manager's mistaken fill there must not be sent (2026-09-18).
+                if (login.onCodePage()) { finish(); toast(`${host}: code page — the code is yours to type; nothing is submitted for you`); return; }
                 if (!seen) {
                     seen = true;
                     const last = Number(GM_getValue(`loginAttempt:${host}`, 0) || 0);
