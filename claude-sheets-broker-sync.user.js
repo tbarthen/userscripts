@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.14
+// @version      3.15
 // @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates or clicks on its own - only a menu command you chose does (v3.5: Schwab "Sync positions"; v3.6: opt-in auto-login after a password-manager fill).
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
@@ -14,6 +14,7 @@
 // @match        https://wwws.betterment.com/*
 // @match        https://app.betterment.com/*
 // @noframes
+// @run-at       document-start
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -59,7 +60,7 @@
  * the sites unusable with them enabled; every action here happens on the page you chose
  * to open, or from the menu.
  *
- * v3.6–3.14 (2026-09-17/18) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
+ * v3.6–3.15 (2026-09-17/18) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
  * turn it on). The broker-sync launcher (AutoHotKey `broker_sync.ahk`, Ctrl+Alt+B or the
  * on-unlock scheduled task) opens the three data pages; a site whose session expired shows
  * its login page instead, and Bitwarden fills it (page load, or Ctrl+Shift+L sent by the
@@ -84,8 +85,30 @@
  * once from the menu. This file is public (github.com/tbarthen/userscripts).
  * Page anchors: docs/portfolio/broker_readings_scrape_notes.md in the workbook repo.
  */
+// v3.15: the script runs at DOCUMENT-START so that on Merrill it can strip the password
+// input's `data-sparta-input-mask` attribute the instant the element appears — before the
+// site's code scans for it and attaches the Inputmask that discards every programmatic fill.
+// No mask is ever created; the site's own listeners stay; the password manager fills normally.
+// (Removing an already-attached mask never reached its instance from this realm, and a cloned
+// input is what the site ignores — 2026-09-18.) Everything else waits for the DOM as before.
 (function () {
     'use strict';
+    if (location.hostname === 'www.benefits.ml.com' && typeof MutationObserver === 'function') {
+        const strip = (root) => {
+            const nodes = root.querySelectorAll ? root.querySelectorAll('input[data-sparta-input-mask]') : [];
+            for (const el of nodes) {
+                el.removeAttribute('data-sparta-input-mask');
+                el.setAttribute('data-claude-mask', 'prevented');
+            }
+        };
+        const mo = new MutationObserver((records) => {
+            for (const r of records) for (const n of r.addedNodes) if (n.nodeType === 1) strip(n);
+        });
+        mo.observe(document.documentElement, { childList: true, subtree: true });
+        strip(document);
+        document.addEventListener('DOMContentLoaded', () => { strip(document); setTimeout(() => mo.disconnect(), 60000); });
+    }
+    const main = () => {
 
     const FUNCTIONS = 'https://us-central1-claude-sheets.cloudfunctions.net';
     const MONEY = /^\$[\d,]+\.\d{2}$/;
@@ -201,6 +224,7 @@
         // Three routes, in order: the instance from this script's realm; the page realm via an
         // injected script (Tampermonkey may run in an isolated world); the clone as last resort.
         stripMask(pw) {
+            if (pw.getAttribute('data-claude-mask') === 'prevented') { toast('Merrill: password mask prevented at page start', false, 3000); return pw; }
             if (!pw.hasAttribute('data-sparta-input-mask')) return pw;
             const removed = () => pw.getAttribute('data-claude-mask') === 'removed';
             try {
@@ -623,4 +647,7 @@
     }
     // v3.6: the login handler is additive — it runs beside the site handler on a login page.
     if (login.test()) login.start();
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', main);
+    else main();
 })();
