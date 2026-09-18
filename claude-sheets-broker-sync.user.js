@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.10
+// @version      3.11
 // @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates or clicks on its own - only a menu command you chose does (v3.5: Schwab "Sync positions"; v3.6: opt-in auto-login after a password-manager fill).
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
@@ -59,7 +59,7 @@
  * the sites unusable with them enabled; every action here happens on the page you chose
  * to open, or from the menu.
  *
- * v3.6–3.10 (2026-09-17/18) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
+ * v3.6–3.11 (2026-09-17/18) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
  * turn it on). The broker-sync launcher (AutoHotKey `broker_sync.ahk`, Ctrl+Alt+B or the
  * on-unlock scheduled task) opens the three data pages; a site whose session expired shows
  * its login page instead, and Bitwarden fills it (page load, or Ctrl+Shift+L sent by the
@@ -76,7 +76,8 @@
  *   is the last resort, and typing the password by hand the fallback behind that.
  * The tab title is prefixed on completion — "✅ " once a reading was posted (or was already
  * on the sheet), "⚠️ " when nothing could be read — so a glance at the tab strip is the
- * run report; an open login page is a tab that needs you.
+ * run report; an open login page is a tab that needs you. Each tab also keeps a run log
+ * panel (top right, click to dismiss — v3.11) with every message in order.
  *
  * NO SECRETS IN THIS FILE. The one API key (`cloud-functions-api-key`; all three functions
  * take it since 2026-09-03) and the Vanguard account ID live in Tampermonkey storage, set
@@ -103,17 +104,27 @@
     }
 
     // ============ UI ============
+    // v3.11: a RUN LOG, not a toast. The launcher opens three tabs and only one is on screen,
+    // so a six-second toast on a background tab was never seen (Tom, 2026-09-18). Every message
+    // is appended to a fixed panel that stays until clicked; the newest line is highlighted.
+    // The `ms` argument is kept for callers and ignored.
     function toast(message, isError = false, ms = 6000) {
-        document.getElementById(TOAST_ID)?.remove();
-        const el = document.createElement('div');
-        el.id = TOAST_ID;
-        el.textContent = message;
-        el.style.cssText = `position:fixed;top:20px;right:20px;padding:14px 20px;` +
-            `background:${isError ? '#d32f2f' : '#1a73e8'};color:white;border-radius:8px;` +
-            `font:14px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;z-index:2147483647;` +
-            `box-shadow:0 4px 12px rgba(0,0,0,0.3);max-width:440px;`;
-        document.body.appendChild(el);
-        setTimeout(() => el.remove(), ms);
+        let panel = document.getElementById(TOAST_ID);
+        if (!panel) {
+            panel = document.createElement('div');
+            panel.id = TOAST_ID;
+            panel.title = 'Claude Sheets run log — click to dismiss';
+            panel.style.cssText = `position:fixed;top:20px;right:20px;padding:10px 14px;background:#202124;color:#e8eaed;` +
+                `border-radius:8px;font:13px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;z-index:2147483647;` +
+                `box-shadow:0 4px 12px rgba(0,0,0,0.35);max-width:460px;cursor:pointer;`;
+            panel.addEventListener('click', () => panel.remove());
+            document.body.appendChild(panel);
+        }
+        for (const old of panel.children) old.style.fontWeight = 'normal';
+        const line = document.createElement('div');
+        line.textContent = `${new Date().toTimeString().slice(0, 8)}  ${message}`;
+        line.style.cssText = `padding:3px 0;font-weight:bold;color:${isError ? '#f28b82' : '#8ab4f8'};`;
+        panel.appendChild(line);
         console.log(`[Claude Sheets] ${message}`);
     }
 
