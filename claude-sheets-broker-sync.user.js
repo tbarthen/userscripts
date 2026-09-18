@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.9
+// @version      3.10
 // @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates or clicks on its own - only a menu command you chose does (v3.5: Schwab "Sync positions"; v3.6: opt-in auto-login after a password-manager fill).
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
@@ -59,7 +59,7 @@
  * the sites unusable with them enabled; every action here happens on the page you chose
  * to open, or from the menu.
  *
- * v3.6–3.9 (2026-09-17) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
+ * v3.6–3.10 (2026-09-17/18) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
  * turn it on). The broker-sync launcher (AutoHotKey `broker_sync.ahk`, Ctrl+Alt+B or the
  * on-unlock scheduled task) opens the three data pages; a site whose session expired shows
  * its login page instead, and Bitwarden fills it (page load, or Ctrl+Shift+L sent by the
@@ -71,9 +71,9 @@
  * been submitted in the last 10 minutes (ONE attempt per site per run — a retried wrong
  * password is how accounts get locked). It never reads, stores or types a credential.
  *   Merrill's password input carries an Inputmask (`data-sparta-input-mask`,
- *   inputEventOnly) that discards programmatic values, so on that page the input is
- *   replaced by a plain clone before the fill; if Merrill's submit rejects the clone, the
- *   fallback is typing the password by hand (the site remembers the user ID and device).
+ *   inputEventOnly) that discards programmatic values, so on that page the mask is removed
+ *   from the input (its own `remove()`, listeners kept — v3.10) before the fill; the clone
+ *   is the last resort, and typing the password by hand the fallback behind that.
  * The tab title is prefixed on completion — "✅ " once a reading was posted (or was already
  * on the sheet), "⚠️ " when nothing could be read — so a glance at the tab strip is the
  * run report; an open login page is a tab that needs you.
@@ -161,13 +161,39 @@
         },
         // Merrill: replace the Inputmask-bound password input with a plain clone (same id/name,
         // no listeners, no autocomplete=off) so a programmatic fill sticks.
+        // v3.10: remove the mask FROM THE ORIGINAL INPUT (Inputmask keeps its instance on the
+        // element: `el.inputmask.remove()`), so the site's own listeners stay bound and the
+        // framework model sees the fill. The v3.6 clone shed the mask AND the listeners, so
+        // Merrill submitted an empty password ("failed", no phone approval — 2026-09-18).
+        // Three routes, in order: the instance from this script's realm; the page realm via an
+        // injected script (Tampermonkey may run in an isolated world); the clone as last resort.
         stripMask(pw) {
             if (!pw.hasAttribute('data-sparta-input-mask')) return pw;
+            const removed = () => pw.getAttribute('data-claude-mask') === 'removed';
+            try {
+                const inst = pw.inputmask || (typeof unsafeWindow !== 'undefined' && unsafeWindow.document.getElementById(pw.id) && unsafeWindow.document.getElementById(pw.id).inputmask);
+                if (inst && typeof inst.remove === 'function') { inst.remove(); pw.setAttribute('data-claude-mask', 'removed'); }
+            } catch (e) { /* fall through */ }
+            if (!removed()) {
+                try {
+                    const script = document.createElement('script');
+                    script.textContent = '(function(){var el=document.getElementById(' + JSON.stringify(pw.id) + ');' +
+                        'if(!el)return;var i=el.inputmask;if(i&&i.remove){i.remove();el.setAttribute("data-claude-mask","removed");}' +
+                        'else if(window.Inputmask&&window.Inputmask.remove){window.Inputmask.remove(el);el.setAttribute("data-claude-mask","removed");}})();';
+                    (document.head || document.documentElement).appendChild(script);
+                    script.remove();
+                } catch (e) { /* CSP may refuse; fall through */ }
+            }
+            if (removed()) {
+                pw.removeAttribute('data-sparta-input-mask');
+                toast('Merrill: password input mask removed (site listeners kept)', false, 3000);
+                return pw;
+            }
             const clone = pw.cloneNode(false);
             clone.removeAttribute('data-sparta-input-mask');
             clone.removeAttribute('autocomplete');
             pw.replaceWith(clone);
-            toast('Merrill: password input mask removed for the fill', false, 3000);
+            toast('Merrill: mask instance not reachable — input cloned (the site may not see the fill)', true, 6000);
             return clone;
         },
         test: () => setting('autoLogin') === 'on',
