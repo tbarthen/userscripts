@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.16
+// @version      3.17
 // @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates or clicks on its own - only a menu command you chose does (v3.5: Schwab "Sync positions"; v3.6: opt-in auto-login after a password-manager fill).
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
@@ -315,7 +315,9 @@
                             el.dispatchEvent(new Event('input', { bubbles: true }));
                             el.dispatchEvent(new Event('change', { bubbles: true }));
                         }
-                        setTimeout(() => login.press(button), 400);
+                        // v3.17: a plain .click() — the pointer-shaped sequence (v3.13) never reached
+                        // Merrill's handler (page unchanged, 2026-09-18), while a plain click had.
+                        setTimeout(() => button.click(), 400);
                     }, login.SETTLE_MS);
                     return;
                 }
