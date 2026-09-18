@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.11
+// @version      3.12
 // @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates or clicks on its own - only a menu command you chose does (v3.5: Schwab "Sync positions"; v3.6: opt-in auto-login after a password-manager fill).
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
@@ -59,7 +59,7 @@
  * the sites unusable with them enabled; every action here happens on the page you chose
  * to open, or from the menu.
  *
- * v3.6–3.11 (2026-09-17/18) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
+ * v3.6–3.12 (2026-09-17/18) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
  * turn it on). The broker-sync launcher (AutoHotKey `broker_sync.ahk`, Ctrl+Alt+B or the
  * on-unlock scheduled task) opens the three data pages; a site whose session expired shows
  * its login page instead, and Bitwarden fills it (page load, or Ctrl+Shift+L sent by the
@@ -77,7 +77,7 @@
  * The tab title is prefixed on completion — "✅ " once a reading was posted (or was already
  * on the sheet), "⚠️ " when nothing could be read — so a glance at the tab strip is the
  * run report; an open login page is a tab that needs you. Each tab also keeps a run log
- * panel (top right, click to dismiss — v3.11) with every message in order.
+ * panel (top right; selectable, with copy and \u2715 — v3.11/3.12) with every message in order.
  *
  * NO SECRETS IN THIS FILE. The one API key (`cloud-functions-api-key`; all three functions
  * take it since 2026-09-03) and the Vanguard account ID live in Tampermonkey storage, set
@@ -113,15 +113,29 @@
         if (!panel) {
             panel = document.createElement('div');
             panel.id = TOAST_ID;
-            panel.title = 'Claude Sheets run log — click to dismiss';
-            panel.style.cssText = `position:fixed;top:20px;right:20px;padding:10px 14px;background:#202124;color:#e8eaed;` +
+            panel.style.cssText = `position:fixed;top:20px;right:20px;padding:8px 12px 10px;background:#202124;color:#e8eaed;` +
                 `border-radius:8px;font:13px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;z-index:2147483647;` +
-                `box-shadow:0 4px 12px rgba(0,0,0,0.35);max-width:460px;cursor:pointer;`;
-            panel.addEventListener('click', () => panel.remove());
+                `box-shadow:0 4px 12px rgba(0,0,0,0.35);max-width:460px;user-select:text;`;
+            // v3.12: the text is selectable; dismiss and copy are explicit buttons (a click to
+            // select text used to dismiss the panel before anything could be copied).
+            const bar = document.createElement('div');
+            bar.style.cssText = 'display:flex;justify-content:flex-end;gap:10px;margin-bottom:4px;font-size:12px;';
+            const copy = document.createElement('span');
+            copy.textContent = 'copy'; copy.style.cssText = 'cursor:pointer;color:#9aa0a6;';
+            copy.addEventListener('click', () => {
+                const text = [...panel.querySelectorAll('.cs-line')].map(l => l.textContent).join('\n');
+                try { navigator.clipboard.writeText(text); copy.textContent = 'copied'; } catch { copy.textContent = 'select + Ctrl+C'; }
+            });
+            const close = document.createElement('span');
+            close.textContent = '\u2715'; close.style.cssText = 'cursor:pointer;color:#9aa0a6;';
+            close.addEventListener('click', () => panel.remove());
+            bar.appendChild(copy); bar.appendChild(close);
+            panel.appendChild(bar);
             document.body.appendChild(panel);
         }
-        for (const old of panel.children) old.style.fontWeight = 'normal';
+        for (const old of panel.querySelectorAll('.cs-line')) old.style.fontWeight = 'normal';
         const line = document.createElement('div');
+        line.className = 'cs-line';
         line.textContent = `${new Date().toTimeString().slice(0, 8)}  ${message}`;
         line.style.cssText = `padding:3px 0;font-weight:bold;color:${isError ? '#f28b82' : '#8ab4f8'};`;
         panel.appendChild(line);
