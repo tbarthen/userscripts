@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.15
+// @version      3.16
 // @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates or clicks on its own - only a menu command you chose does (v3.5: Schwab "Sync positions"; v3.6: opt-in auto-login after a password-manager fill).
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
@@ -640,6 +640,12 @@
     GM_registerMenuCommand(`Auto-login after autofill: ${setting('autoLogin') === 'on' ? 'ON (click to turn off)' : 'off (click to turn on)'}`, () => {
         GM_setValue('autoLogin', setting('autoLogin') === 'on' ? 'off' : 'on');
         toast(`Auto-login after autofill is now ${setting('autoLogin') === 'on' ? 'ON' : 'off'} — reload the page`);
+    });
+    // v3.16: clear this site's one-attempt stamp so a reload lets the handler submit again —
+    // for testing a login page without waiting out the 10-minute window. Deliberate, per site.
+    GM_registerMenuCommand('Reset auto-login attempt (this site)', () => {
+        GM_setValue(`loginAttempt:${location.hostname}`, 0);
+        toast(`${location.hostname}: auto-login attempt reset — reload to let the script submit`);
     });
     if (handler) {
         for (const [label, fn] of handler.menu) GM_registerMenuCommand(label, fn);
