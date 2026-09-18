@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.13
+// @version      3.14
 // @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates or clicks on its own - only a menu command you chose does (v3.5: Schwab "Sync positions"; v3.6: opt-in auto-login after a password-manager fill).
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
@@ -59,7 +59,7 @@
  * the sites unusable with them enabled; every action here happens on the page you chose
  * to open, or from the menu.
  *
- * v3.6–3.13 (2026-09-17/18) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
+ * v3.6–3.14 (2026-09-17/18) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
  * turn it on). The broker-sync launcher (AutoHotKey `broker_sync.ahk`, Ctrl+Alt+B or the
  * on-unlock scheduled task) opens the three data pages; a site whose session expired shows
  * its login page instead, and Bitwarden fills it (page load, or Ctrl+Shift+L sent by the
@@ -71,9 +71,9 @@
  * been submitted in the last 10 minutes (ONE attempt per site per run — a retried wrong
  * password is how accounts get locked). It never reads, stores or types a credential.
  *   Merrill's password input carries an Inputmask (`data-sparta-input-mask`,
- *   inputEventOnly) that discards programmatic values, so on that page the mask is removed
- *   from the input (its own `remove()`, listeners kept — v3.10) before the fill; the clone
- *   is the last resort, and typing the password by hand the fallback behind that.
+ *   inputEventOnly); the mask is removed from the input when its instance is reachable
+ *   (v3.10), otherwise the input is left alone — Bitwarden's fill lands in it anyway, and a
+ *   cloned input is what the site ignores (v3.14). Typing by hand is the fallback.
  * The tab title is prefixed on completion — "✅ " once a reading was posted (or was already
  * on the sheet), "⚠️ " when nothing could be read — so a glance at the tab strip is the
  * run report; an open login page is a tab that needs you. Each tab also keeps a run log
@@ -222,12 +222,11 @@
                 toast('Merrill: password input mask removed (site listeners kept)', false, 3000);
                 return pw;
             }
-            const clone = pw.cloneNode(false);
-            clone.removeAttribute('data-sparta-input-mask');
-            clone.removeAttribute('autocomplete');
-            pw.replaceWith(clone);
-            toast('Merrill: mask instance not reachable — input cloned (the site may not see the fill)', true, 6000);
-            return clone;
+            // v3.14: NO clone. The site ignores a cloned input (it submitted empty, 2026-09-18),
+            // while Bitwarden's fill into the ORIGINAL masked input reached the phone-code step
+            // when clicked by hand. So leave the input alone and let the fill land in it.
+            toast('Merrill: mask instance not reachable — leaving the input as is', false, 3000);
+            return pw;
         },
         test: () => setting('autoLogin') === 'on',
         menu: [],
@@ -282,7 +281,11 @@
                     // the password in the browser on submit (`encryptKey` in its URL); a bare .click()
                     // right after the fill went out without it → GENERAL_ERROR (2026-09-18), while the
                     // same fill clicked by hand a moment later reached the phone-code step.
+                    // v3.14: the input/change nudge and the pointer-shaped click are for Merrill
+                    // only — Vanguard, which logged in with the plain click, stopped with them.
+                    const merrill = /benefits\.ml\.com$/.test(host);
                     setTimeout(() => {
+                        if (!merrill) { button.click(); return; }
                         for (const el of [user, pw]) {
                             if (!el) continue;
                             el.dispatchEvent(new Event('input', { bubbles: true }));
