@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.17
+// @version      3.18
 // @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates or clicks on its own - only a menu command you chose does (v3.5: Schwab "Sync positions"; v3.6: opt-in auto-login after a password-manager fill).
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
@@ -326,6 +326,61 @@
         }
     };
 
+    // ============ HANDLER: Merrill "Get authorization code" (v3.18, opt-in with auto-login) ============
+    // After the login, Merrill may ask which phone to text a code to. With a phone configured
+    // (menu "Set Merrill code phone (last 4)" — Tampermonkey storage, never this file), the
+    // script picks the radio whose label ends with those digits, keeps "Text message", and
+    // clicks Next — once per run. The code itself is typed by a human; nothing else is entered.
+    const mfa = {
+        POLL_MS: 300, POLL_LIMIT_MS: 60000,
+        test: () => setting('autoLogin') === 'on' && location.hostname === 'www.benefits.ml.com' && !!setting('merrillCodePhone'),
+        page: () => /Get authorization code/i.test(document.body ? document.body.innerText : ''),
+        phoneRadio(last4) {
+            for (const radio of document.querySelectorAll('input[type="radio"]')) {
+                const label = (radio.labels && radio.labels[0]) || (radio.id && document.querySelector(`label[for="${radio.id}"]`)) || radio.closest('label');
+                const text = (label ? label.textContent : '') || (radio.parentElement ? radio.parentElement.textContent : '');
+                if (text.replace(/\D/g, '').endsWith(last4)) return radio;
+            }
+            return null;
+        },
+        textRadio() {
+            for (const radio of document.querySelectorAll('input[type="radio"]')) {
+                const label = (radio.labels && radio.labels[0]) || radio.closest('label') || radio.parentElement;
+                if (label && /text message/i.test(label.textContent)) return radio;
+            }
+            return null;
+        },
+        nextButton() {
+            return [...document.querySelectorAll('button, input[type="button"], input[type="submit"]')]
+                .find(b => login.shown(b) && /^\s*next\s*$/i.test(b.textContent || b.value || '')) || null;
+        },
+        start() {
+            const last4 = setting('merrillCodePhone').replace(/\D/g, '').slice(-4);
+            const began = Date.now();
+            let done = false;
+            const timer = setInterval(() => {
+                if (done) return;
+                if (!mfa.page()) { if (Date.now() - began > mfa.POLL_LIMIT_MS) { done = true; clearInterval(timer); } return; }
+                done = true; clearInterval(timer);
+                const key = `mfaAttempt:${location.hostname}`;
+                const last = Number(GM_getValue(key, 0) || 0);
+                if (Date.now() - last < login.ATTEMPT_WINDOW_MS) { toast('Merrill: a code was already requested this run — choose the phone yourself', true); return; }
+                const phone = mfa.phoneRadio(last4);
+                if (!phone) { toast(`Merrill: no phone ending in ${last4} on the code page — choose it yourself`, true); return; }
+                phone.click();
+                const text = mfa.textRadio();
+                if (text && !text.checked) text.click();
+                setTimeout(() => {
+                    const next = mfa.nextButton();
+                    if (!next) { toast('Merrill: phone chosen, but no Next button found — press it yourself', true); return; }
+                    GM_setValue(key, Date.now());
+                    toast(`Merrill: requesting a text code to the phone ending in ${last4} — type it when it arrives`);
+                    next.click();
+                }, 600);
+            }, mfa.POLL_MS);
+        }
+    };
+
     /** POST JSON to one of the Cloud Functions with the shared key; resolves the parsed body. */
     function postToFunction(name, payload, apiKey) {
         return new Promise((resolve, reject) => {
@@ -645,8 +700,12 @@
     });
     // v3.16: clear this site's one-attempt stamp so a reload lets the handler submit again —
     // for testing a login page without waiting out the 10-minute window. Deliberate, per site.
+    if (location.hostname === 'www.benefits.ml.com') {
+        GM_registerMenuCommand('Set Merrill code phone (last 4)', () => askAndStore('merrillCodePhone', 'Merrill code phone (last 4 digits)'));
+    }
     GM_registerMenuCommand('Reset auto-login attempt (this site)', () => {
         GM_setValue(`loginAttempt:${location.hostname}`, 0);
+        GM_setValue(`mfaAttempt:${location.hostname}`, 0);
         toast(`${location.hostname}: auto-login attempt reset — reload to let the script submit`);
     });
     if (handler) {
@@ -655,6 +714,8 @@
     }
     // v3.6: the login handler is additive — it runs beside the site handler on a login page.
     if (login.test()) login.start();
+    // v3.18: so is the Merrill code-page handler.
+    if (mfa.test()) mfa.start();
     };
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', main);
     else main();
