@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Sheets Broker Sync
 // @namespace    http://tampermonkey.net/
-// @version      3.12
+// @version      3.13
 // @description  One script for every broker site: Vanguard cost basis, Schwab cost basis, Vanguard / Merrill / Betterment balance readings, all to the claude-sheets Cloud Functions with ONE API key. Passive: never navigates or clicks on its own - only a menu command you chose does (v3.5: Schwab "Sync positions"; v3.6: opt-in auto-login after a password-manager fill).
 // @author       Tom
 // @homepageURL  https://github.com/tbarthen/userscripts
@@ -59,7 +59,7 @@
  * the sites unusable with them enabled; every action here happens on the page you chose
  * to open, or from the menu.
  *
- * v3.6–3.12 (2026-09-17/18) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
+ * v3.6–3.13 (2026-09-17/18) — AUTO-LOGIN, OPT-IN (menu "Auto-login after autofill", off until you
  * turn it on). The broker-sync launcher (AutoHotKey `broker_sync.ahk`, Ctrl+Alt+B or the
  * on-unlock scheduled task) opens the three data pages; a site whose session expired shows
  * its login page instead, and Bitwarden fills it (page load, or Ctrl+Shift+L sent by the
@@ -150,7 +150,15 @@
 
     // ============ HANDLER: auto-login after a password-manager fill (v3.6, opt-in) ============
     const login = {
-        ATTEMPT_WINDOW_MS: 10 * 60 * 1000, POLL_MS: 300, POLL_LIMIT_MS: 90000,
+        ATTEMPT_WINDOW_MS: 10 * 60 * 1000, POLL_MS: 300, POLL_LIMIT_MS: 90000, SETTLE_MS: 1200,
+        /** A click the way a pointer makes one: pointerdown → mousedown → focus → pointerup → mouseup → click. */
+        press(button) {
+            const opts = { bubbles: true, cancelable: true, view: window };
+            for (const type of ['pointerdown', 'mousedown']) button.dispatchEvent(new MouseEvent(type, opts));
+            if (typeof button.focus === 'function') button.focus();
+            for (const type of ['pointerup', 'mouseup']) button.dispatchEvent(new MouseEvent(type, opts));
+            button.click();
+        },
         visible: (el) => !!(el && el.offsetParent !== null && !el.disabled && !el.readOnly),
         passwordField: () => [...document.querySelectorAll('input[type="password"]')].find(login.visible) || null,
         // The text field that precedes the password field in DOM order (username / email);
@@ -270,7 +278,18 @@
                     finish();
                     GM_setValue(`loginAttempt:${host}`, Date.now());
                     toast(`${host}: password manager filled the form — logging in (one attempt)`, false, 4000);
-                    button.click();
+                    // v3.13: let the site's own handlers see the fill before the click. Merrill encrypts
+                    // the password in the browser on submit (`encryptKey` in its URL); a bare .click()
+                    // right after the fill went out without it → GENERAL_ERROR (2026-09-18), while the
+                    // same fill clicked by hand a moment later reached the phone-code step.
+                    setTimeout(() => {
+                        for (const el of [user, pw]) {
+                            if (!el) continue;
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                        setTimeout(() => login.press(button), 400);
+                    }, login.SETTLE_MS);
                     return;
                 }
                 if (Date.now() - began > login.POLL_LIMIT_MS) finish();     // nothing filled: yours
